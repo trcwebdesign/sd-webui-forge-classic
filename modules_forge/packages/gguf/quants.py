@@ -1416,10 +1416,45 @@ class IQ2_S(__Quant, qtype=GGMLQuantizationType.IQ2_S):
 
         return (db * grid * signs).reshape((n_blocks, -1))
 
+    @classmethod
+    def dequantize_blocks_pytorch(
+        cls, blocks, block_size, type_size, parameter
+    ) -> torch.Tensor:
+        n_blocks = blocks.shape[0]
+        d, rest = quick_split(blocks, [2])
+        qs, rest = quick_split(rest, [QK_K // 8])
+        signs, rest = quick_split(rest, [QK_K // 8])
+        qh, scales = quick_split(rest, [QK_K // 32])
+
+        d = d.view(torch.float16).to(parameter.computation_dtype)
+        scale_shifts = torch.tensor([0, 4], device=blocks.device, dtype=torch.uint8)
+        scales = scales.reshape((n_blocks, -1, 1)) >> scale_shifts
+        scales = (scales & 0x0F).reshape((n_blocks, -1))
+        db = d * (0.5 + scales.to(d.dtype)) * 0.25
+        db = db.reshape((n_blocks, -1, 1, 1))
+
+        bit_shifts = torch.arange(8, device=blocks.device, dtype=torch.uint8)
+        signs = signs.reshape((n_blocks, -1, 1)) >> bit_shifts
+        signs = (signs & 0x01).to(d.dtype)
+        signs = torch.where(signs == 0, 1.0, -1.0)
+        signs = signs.reshape((n_blocks, -1, 2, 8))
+
+        high_shifts = torch.tensor([0, 2, 4, 6], device=blocks.device, dtype=torch.uint8)
+        qh = qh.reshape((n_blocks, -1, 1)) >> high_shifts
+        qh = (qh & 0x03).reshape((n_blocks, -1)).to(torch.int32)
+        qs = qs.to(torch.int32) | (qh << 8)
+
+        cls.init_grid()
+        grid = torch.as_tensor(cls.grid, device=blocks.device, dtype=d.dtype)[0, 0]
+        grid = grid[qs.long()].reshape((n_blocks, -1, 2, 8))
+
+        return (db * grid * signs).reshape((n_blocks, -1))
+
 
 class IQ3_XXS(__Quant, qtype=GGMLQuantizationType.IQ3_XXS):
     grid_shape = (256, 4)
     grid_map = (0x04, 0x0C, 0x14, 0x1C, 0x24, 0x2C, 0x34, 0x3E)
+    ksigns = IQ2_XXS.ksigns
     grid_hex = (
         b"0000020004001100130017002000220031004200730075000101030110011201"
         b"2101250130013201410154017001000202020402110220022202310233023702"
@@ -1469,6 +1504,35 @@ class IQ3_XXS(__Quant, qtype=GGMLQuantizationType.IQ3_XXS):
         assert cls.grid is not None
         grid = np.take_along_axis(cls.grid, qs.reshape((n_blocks, -1, 1, 1)), axis=-2)
         grid = grid.reshape((n_blocks, -1, 4, 8))
+
+        return (db * grid * signs).reshape((n_blocks, -1))
+
+    @classmethod
+    def dequantize_blocks_pytorch(
+        cls, blocks, block_size, type_size, parameter
+    ) -> torch.Tensor:
+        n_blocks = blocks.shape[0]
+        d, rest = quick_split(blocks, [2])
+        qs, scales = quick_split(rest, [QK_K // 4])
+
+        d = d.view(torch.float16).to(parameter.computation_dtype)
+        scales = scales.contiguous().view(torch.int32)
+        db = d * (0.5 + ((scales >> 28) & 0xF).to(d.dtype)) * 0.5
+        db = db.reshape((n_blocks, -1, 1, 1))
+
+        sign_shifts = torch.tensor([0, 7, 14, 21], device=blocks.device, dtype=torch.int32)
+        signs = scales.reshape((n_blocks, -1, 1)) >> sign_shifts
+        signs = (signs & 0x7F).reshape((n_blocks, -1, 4, 1))
+        ksigns = torch.tensor(list(cls.ksigns), device=blocks.device, dtype=torch.uint8)
+        signs = ksigns[signs.long()]
+        bit_shifts = torch.arange(8, device=blocks.device, dtype=torch.uint8)
+        signs = (signs >> bit_shifts) & 0x01
+        signs = torch.where(signs == 0, 1.0, -1.0).to(d.dtype)
+        signs = signs.reshape((n_blocks, -1, 4, 8))
+
+        cls.init_grid()
+        grid = torch.as_tensor(cls.grid, device=blocks.device, dtype=d.dtype)[0, 0]
+        grid = grid[qs.long()].reshape((n_blocks, -1, 4, 8))
 
         return (db * grid * signs).reshape((n_blocks, -1))
 

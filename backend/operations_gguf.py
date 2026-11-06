@@ -14,6 +14,8 @@ QUANTS_MAPPING: dict[gguf.constants.GGMLQuantizationType, gguf.quants.__Quant] =
     gguf.GGMLQuantizationType.Q6_K: gguf.Q6_K,
     gguf.GGMLQuantizationType.Q8_0: gguf.Q8_0,
     gguf.GGMLQuantizationType.BF16: gguf.BF16,
+    gguf.GGMLQuantizationType.IQ2_S: gguf.IQ2_S,
+    gguf.GGMLQuantizationType.IQ3_XXS: gguf.IQ3_XXS,
     gguf.GGMLQuantizationType.NVFP4: gguf.NVFP4,
 }
 
