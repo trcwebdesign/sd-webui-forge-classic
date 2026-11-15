@@ -408,9 +408,9 @@ def _gguf_nvfp4_to_tensorcore(weight, device, dtype):
     from backend.float import to_blocked
     from backend.operations_mixed_precision import QuantizedTensor
     from backend.quant_ops import TensorCoreNVFP4Layout
-    from modules_forge.packages import gguf
+    from modules_forge.packages.gguf import quants
 
-    if getattr(weight, "gguf_cls", None) is not gguf.NVFP4:
+    if getattr(weight, "gguf_cls", None) is not quants.NVFP4:
         return None
 
     rows, columns = weight.shape
@@ -518,7 +518,8 @@ class ForgeOperationsGGUF(ForgeOperations):
                     output = output.reshape((*input_shape[:-1], self.weight.shape[0]))
                 return output
 
-            weight, bias, signal = weights_manual_cast(self, x, weight_fn=dequantize_tensor, skip_bias_dtype=True)
+            weight_fn = (lambda weight: dequantize_tensor(weight, input=x)) if args.enable_triton_backend else dequantize_tensor
+            weight, bias, signal = weights_manual_cast(self, x, weight_fn=weight_fn, skip_bias_dtype=True)
             with main_stream_worker(weight, bias, signal):
                 return torch.nn.functional.linear(x, weight, bias)
 
