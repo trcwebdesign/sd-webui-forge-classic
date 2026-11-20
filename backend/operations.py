@@ -441,55 +441,43 @@ class ForgeOperationsGGUF(ForgeOperations):
             super().__init__()
             self.in_features = kwargs.get("in_features", args[0] if len(args) > 0 else None)
             self.out_features = kwargs.get("out_features", args[1] if len(args) > 1 else None)
-            self.dummy = {"device": current_device, "dtype": current_dtype}
+            self._initial_device = current_device
+            self._computation_dtype = current_dtype if current_dtype in (torch.float16, torch.bfloat16) else torch.float16
             self.weight = None
             self.bias = None
 
         def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
-            if hasattr(self, "dummy"):
-                if (computation_dtype := self.dummy["dtype"]) not in [torch.float16, torch.bfloat16]:
-                    computation_dtype = torch.float16
-
-                if prefix + "weight" in state_dict:
-                    weight = state_dict[prefix + "weight"]
-                    if (
-                        hasattr(weight, "real_shape")
-                        and len(weight.shape) == 1
-                        and self.in_features is not None
-                        and self.out_features is not None
-                        and weight.shape[0] == self.in_features * self.out_features
-                    ):
-                        logical_shape = (self.out_features, self.in_features)
-                        if weight.gguf_cls is None:
-                            storage_shape = logical_shape
-                        else:
-                            block_size = weight.gguf_cls.block_size
-                            type_size = weight.gguf_cls.type_size
-                            if self.in_features % block_size != 0:
-                                raise ValueError(f"Cannot restore GGUF shape for {prefix}weight")
-                            storage_shape = (self.out_features, self.in_features // block_size * type_size)
-                        weight.data = weight.data.reshape(storage_shape)
-                        weight.real_shape = torch.Size(logical_shape)
-                    weight = weight.to(device=self.dummy["device"])
-                    if memory_management.supports_nvfp4_compute(memory_management.get_torch_device()):
-                        quantized_weight = _gguf_nvfp4_to_tensorcore(weight, self.dummy["device"], computation_dtype)
+            if prefix + "weight" in state_dict:
+                weight = state_dict[prefix + "weight"]
+                if (
+                    hasattr(weight, "real_shape")
+                    and len(weight.shape) == 1
+                    and self.in_features is not None
+                    and self.out_features is not None
+                    and weight.shape[0] == self.in_features * self.out_features
+                ):
+                    logical_shape = (self.out_features, self.in_features)
+                    if weight.gguf_cls is None:
+                        storage_shape = logical_shape
                     else:
-                        quantized_weight = None
-                    if quantized_weight is None:
-                        self.weight = weight
-                        self.weight.computation_dtype = computation_dtype
-                    else:
-                        self.weight = torch.nn.Parameter(quantized_weight, requires_grad=False)
-                if prefix + "bias" in state_dict:
-                    self.bias = state_dict[prefix + "bias"].to(device=self.dummy["device"])
-                    self.bias.computation_dtype = computation_dtype
-
-                del self.dummy
-            else:
-                if prefix + "weight" in state_dict:
-                    self.weight = state_dict[prefix + "weight"]
-                if prefix + "bias" in state_dict:
-                    self.bias = state_dict[prefix + "bias"]
+                        block_size = weight.gguf_cls.block_size
+                        type_size = weight.gguf_cls.type_size
+                        if self.in_features % block_size != 0:
+                            raise ValueError(f"Cannot restore GGUF shape for {prefix}weight")
+                        storage_shape = (self.out_features, self.in_features // block_size * type_size)
+                    weight.data = weight.data.reshape(storage_shape)
+                    weight.real_shape = torch.Size(logical_shape)
+                weight = weight.to(device=self._initial_device)
+                weight.computation_dtype = self._computation_dtype
+                if memory_management.supports_nvfp4_compute(memory_management.get_torch_device()):
+                    quantized_weight = _gguf_nvfp4_to_tensorcore(weight, weight.device, self._computation_dtype)
+                    if quantized_weight is not None:
+                        weight = quantized_weight
+                self.weight = utils.tensor2parameter(weight)
+            if prefix + "bias" in state_dict:
+                self.bias = utils.tensor2parameter(state_dict[prefix + "bias"].to(device=self._initial_device))
+                self.bias.computation_dtype = self._computation_dtype
+            self._initial_device = None
 
         def _apply(self, fn, recurse=True):
             for k, p in self.named_parameters(recurse=False, remove_duplicate=True):
@@ -528,28 +516,19 @@ class ForgeOperationsGGUF(ForgeOperations):
             kwargs["device"] = current_device
             kwargs["dtype"] = current_dtype
             super().__init__(*args, **kwargs)
-            self.dummy = {"device": current_device, "dtype": current_dtype}
+            self._initial_device = current_device
+            self._computation_dtype = current_dtype if current_dtype in (torch.float16, torch.bfloat16) else torch.float16
             self.weight = None
             self.bias = None
 
         def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
-            if hasattr(self, "dummy"):
-                if (computation_dtype := self.dummy["dtype"]) not in [torch.float16, torch.bfloat16]:
-                    computation_dtype = torch.float16
-
-                if prefix + "weight" in state_dict:
-                    self.weight = state_dict[prefix + "weight"].to(device=self.dummy["device"])
-                    self.weight.computation_dtype = computation_dtype
-                if prefix + "bias" in state_dict:
-                    self.bias = state_dict[prefix + "bias"].to(device=self.dummy["device"])
-                    self.bias.computation_dtype = computation_dtype
-
-                del self.dummy
-            else:
-                if prefix + "weight" in state_dict:
-                    self.weight = state_dict[prefix + "weight"]
-                if prefix + "bias" in state_dict:
-                    self.bias = state_dict[prefix + "bias"]
+            if prefix + "weight" in state_dict:
+                self.weight = utils.tensor2parameter(state_dict[prefix + "weight"].to(device=self._initial_device))
+                self.weight.computation_dtype = self._computation_dtype
+            if prefix + "bias" in state_dict:
+                self.bias = utils.tensor2parameter(state_dict[prefix + "bias"].to(device=self._initial_device))
+                self.bias.computation_dtype = self._computation_dtype
+            self._initial_device = None
 
         def _apply(self, fn, recurse=True):
             for k, p in self.named_parameters(recurse=False, remove_duplicate=True):
@@ -571,28 +550,18 @@ class ForgeOperationsGGUF(ForgeOperations):
             kwargs["device"] = current_device
             kwargs["dtype"] = current_dtype
             super().__init__(*args, **kwargs)
-            self.dummy = {"device": current_device, "dtype": current_dtype}
+            self._initial_device = current_device
+            self._computation_dtype = current_dtype if current_dtype in (torch.float16, torch.bfloat16) else torch.float16
             self.weight = None
             self.bias = None
 
             self._dtype = current_dtype
 
         def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
-            if hasattr(self, "dummy"):
-                if (computation_dtype := self.dummy["dtype"]) not in [torch.float16, torch.bfloat16]:
-                    computation_dtype = torch.float16
-
-                if prefix + "weight" in state_dict:
-                    _weight = state_dict[prefix + "weight"].to(device=self.dummy["device"])
-                    if not isinstance(_weight, torch.nn.Parameter):
-                        _weight = torch.nn.Parameter(_weight, requires_grad=False)
-                    self.weight = _weight
-                    self.weight.computation_dtype = computation_dtype
-
-                del self.dummy
-            else:
-                if prefix + "weight" in state_dict:
-                    self.weight = state_dict[prefix + "weight"]
+            if prefix + "weight" in state_dict:
+                self.weight = utils.tensor2parameter(state_dict[prefix + "weight"].to(device=self._initial_device))
+                self.weight.computation_dtype = self._computation_dtype
+            self._initial_device = None
 
         def _apply(self, fn, recurse=True):
             for k, p in self.named_parameters(recurse=False, remove_duplicate=True):
